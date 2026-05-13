@@ -431,11 +431,15 @@ function App() {
     if (!confirm('⚠️ ต้องการลบสินค้านี้? การกระทำนี้ไม่สามารถย้อนกลับได้')) return;
     setLoading(true);
     try {
-      await supabase.from('inventory').delete().eq('id', inventoryId);
+      if (inventoryId) {
+        await supabase.from('inventory').delete().eq('id', inventoryId);
+      }
       await supabase.from('products').delete().eq('id', productId);
       fetchProducts();
       alert('ลบสินค้าเรียบร้อยแล้ว');
-    } catch (err) { alert(err.message); }
+    } catch (err) { 
+      alert('ไม่สามารถลบสินค้าได้: ' + err.message); 
+    }
     setLoading(false);
   };
 
@@ -1047,13 +1051,13 @@ function App() {
                     <td style={{ padding: '15px' }}>{p.inventory?.[0]?.current_stock || 0}</td>
                     <td style={{ padding: '15px' }}>
                       <div style={{ display: 'flex', gap: '6px' }}>
-                        <button onClick={() => updateStock(p.inventory[0].id, p.inventory[0].current_stock || 0)} style={stockBtnStyle}>
+                        <button onClick={() => p.inventory?.[0]?.id ? updateStock(p.inventory[0].id, p.inventory[0].current_stock || 0) : alert('ไม่พบข้อมูลสต็อก')} style={stockBtnStyle}>
                           เติมสต็อก
                         </button>
                         <button onClick={() => handleEditProduct(p)} style={{ ...stockBtnStyle, backgroundColor: '#6366f1' }}>
                           แก้ไข
                         </button>
-                        <button onClick={() => handleDeleteProduct(p.id, p.inventory[0].id)} style={{ ...stockBtnStyle, backgroundColor: '#f44336' }}>
+                        <button onClick={() => handleDeleteProduct(p.id, p.inventory?.[0]?.id)} style={{ ...stockBtnStyle, backgroundColor: '#f44336' }}>
                           ลบ
                         </button>
                       </div>
