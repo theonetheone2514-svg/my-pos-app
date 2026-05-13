@@ -298,9 +298,9 @@ function App() {
     const { data, error } = await supabase
       .from('products')
       .select(`
-        *, 
-        inventory!inner(current_stock), 
-        low_threshold, 
+        *,
+        inventory(id, current_stock),
+        low_threshold,
         barcode,
         cost_price
       `)
