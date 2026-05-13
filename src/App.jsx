@@ -29,6 +29,11 @@ function App() {
   const [newProductName, setNewProductName] = useState('');
   const [newProductPrice, setNewProductPrice] = useState('');
   const [newProductCost, setNewProductCost] = useState('');
+  const [searchTerm, setSearchTerm] = useState('');
+  const [editingProduct, setEditingProduct] = useState(null);
+  const [editName, setEditName] = useState('');
+  const [editPrice, setEditPrice] = useState('');
+  const [editCost, setEditCost] = useState('');
 
   // สแกนบาร์โค้ด
   const [scanMode, setScanMode] = useState('sell'); // 'sell' = ขาย, 'stock' = รับสต็อก, 'scanner' = HID scanner
@@ -346,29 +351,26 @@ function App() {
   };
 
   // ==================== Stock Management ====================
-  const updateStock = async (productId, currentStock) => {
+  const updateStock = async (inventoryId, currentStock) => {
     const addAmount = window.prompt(`สต็อกปัจจุบัน: ${currentStock}\nต้องการเติมเพิ่มกี่ชิ้น?`);
     if (!addAmount) return;
     const numToAdd = parseInt(addAmount);
     if (isNaN(numToAdd) || numToAdd < 0) return alert('กรุณากรอกตัวเลขที่ถูกต้อง');
-
     setLoading(true);
     try {
-      await supabase.from('inventory').update({ current_stock: currentStock + numToAdd }).eq('product_id', productId);
-      await recordMovement(productId, numToAdd, 'restock');
+      await supabase.from('inventory').update({ current_stock: currentStock + numToAdd }).eq('id', inventoryId);
+      await recordMovement(inventoryId, numToAdd, 'restock');
       fetchProducts();
-    } catch (err) {
-      alert(err.message);
-    }
+    } catch (err) { alert(err.message); }
     setLoading(false);
   };
 
-  const increaseStock = async (productId, currentStock, amount) => {
+  const increaseStock = async (inventoryId, currentStock, amount) => {
     if (amount <= 0) return alert('จำนวนต้องมากกว่าศูนย์');
     setLoading(true);
     try {
-      await supabase.from('inventory').update({ current_stock: currentStock + amount }).eq('product_id', productId);
-      await recordMovement(productId, amount, 'restock');
+      await supabase.from('inventory').update({ current_stock: currentStock + amount }).eq('id', inventoryId);
+      await recordMovement(inventoryId, amount, 'restock');
       fetchProducts();
       alert(`เพิ่มสต็อก ${amount} ชิ้นเรียบร้อยแล้ว`);
     } catch (err) {
@@ -403,6 +405,37 @@ function App() {
     } catch (err) {
       alert(err.message);
     }
+    setLoading(false);
+  };
+
+  const handleEditProduct = (p) => {
+    setEditingProduct(p.id);
+    setEditName(p.name);
+    setEditPrice(p.price);
+    setEditCost(p.cost_price || '');
+  };
+
+  const handleSaveEdit = async () => {
+    if (!editName || !editPrice) return alert('กรอกข้อมูลให้ครบ');
+    setLoading(true);
+    try {
+      await supabase.from('products').update({ name: editName, price: parseFloat(editPrice), cost_price: parseFloat(editCost) || 0 }).eq('id', editingProduct);
+      setEditingProduct(null);
+      fetchProducts();
+      alert('แก้ไขสินค้าเรียบร้อยแล้ว');
+    } catch (err) { alert(err.message); }
+    setLoading(false);
+  };
+
+  const handleDeleteProduct = async (productId, inventoryId) => {
+    if (!confirm('⚠️ ต้องการลบสินค้านี้? การกระทำนี้ไม่สามารถย้อนกลับได้')) return;
+    setLoading(true);
+    try {
+      await supabase.from('inventory').delete().eq('id', inventoryId);
+      await supabase.from('products').delete().eq('id', productId);
+      fetchProducts();
+      alert('ลบสินค้าเรียบร้อยแล้ว');
+    } catch (err) { alert(err.message); }
     setLoading(false);
   };
 
@@ -480,7 +513,7 @@ function App() {
       const amount = parseInt(amountInput, 10);
       if (isNaN(amount) || amount <= 0) return alert("กรุณากรอกจำนวนเป็นจำนวนเต็มบวก");
 
-      increaseStock(product.id, product.inventory?.[0]?.current_stock || 0, amount);
+      increaseStock(product.inventory[0].id, product.inventory[0].current_stock || 0, amount);
     }
   };
 
@@ -722,7 +755,14 @@ function App() {
           <button onClick={() => setView('pos')} style={navBtnStyle(view === 'pos')}>🛒 ขายสินค้า</button>
           <button onClick={() => setView('dashboard')} style={navBtnStyle(view === 'dashboard')}>📊 ยอดขาย</button>
           <button onClick={() => setView('profit')} style={navBtnStyle(view === 'profit')}>💰 กำไร</button>
-          <button onClick={() => setView('admin')} style={navBtnStyle(view === 'admin')}>⚙️ จัดการสินค้า</button>
+          <button onClick={() => setView('admin')} style={navBtnStyle(view === 'admin')}>
+            ⚙️ จัดการสินค้า
+            {products.filter(p => (p.inventory?.[0]?.current_stock || 0) <= (p.inventory?.[0]?.min_stock_level || 0)).length > 0 && (
+              <span style={{ backgroundColor: '#f44336', color: 'white', padding: '2px 8px', borderRadius: '12px', fontSize: '0.75rem', marginLeft: '6px' }}>
+                ⚠️ {products.filter(p => (p.inventory?.[0]?.current_stock || 0) <= (p.inventory?.[0]?.min_stock_level || 0)).length}
+              </span>
+            )}
+          </button>
         </div>
       </nav>
 
@@ -731,16 +771,33 @@ function App() {
         {view === 'pos' && (
           <div style={{ display: 'flex', gap: '20px', flexWrap: 'wrap' }}>
             {/* Product Grid */}
-            <div style={{ flex: 2, display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: '15px' }}>
+            <div style={{ flex: 2 }}>
+              <input
+                type="text"
+                placeholder="🔍 พิมพ์ชื่อ/บาร์โค้ดสินค้า แล้วกด Enter..."
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && searchTerm.trim()) {
+                    const p = products.find(x =>
+                      x.name.includes(searchTerm) || (x.barcode && x.barcode.includes(searchTerm))
+                    );
+                    if (p) addToCart(p);
+                    setSearchTerm('');
+                  }
+                }}
+                style={{ padding: '10px 15px', borderRadius: '8px', border: '1px solid #444', backgroundColor: '#1e1e1e', color: 'white', width: '100%', marginBottom: '15px', fontSize: '1rem' }}
+              />
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: '15px' }}>
               {products.map(p => {
                 const currentStock = p.inventory?.[0]?.current_stock || 0;
-                const isLowStock = currentStock <= (p.low_threshold || 0);
+                const isLowStock = currentStock <= (p.inventory?.[0]?.min_stock_level || 0);
                 return (
                   <div key={p.id} style={isLowStock ? lowStockStyle : cardStyle}>
                     <h3>{p.name}</h3>
                     <p style={{ color: '#10b981', fontWeight: 'bold', fontSize: '1.2rem' }}>฿{p.price}</p>
                     <p style={{ fontSize: '0.8rem', color: '#888' }}>
-                      สต็อก: {currentStock} (ต่ำสุด: {p.low_threshold})
+                      สต็อก: {currentStock} (ต่ำสุด: {p.inventory?.[0]?.min_stock_level})
                     </p>
                     <p style={{ fontSize: '0.75rem', color: '#f59e0b' }}>
                       ต้นทุน: ฿{p.cost_price?.toFixed(2) || 0}
@@ -749,6 +806,7 @@ function App() {
                   </div>
                 );
               })}
+              </div>
             </div>
 
             {/* Scanner */}
@@ -988,14 +1046,44 @@ function App() {
                     <td style={{ padding: '15px', color: '#f59e0b' }}>฿{p.cost_price?.toFixed(2) || 0}</td>
                     <td style={{ padding: '15px' }}>{p.inventory?.[0]?.current_stock || 0}</td>
                     <td style={{ padding: '15px' }}>
-                      <button onClick={() => updateStock(p.id, p.inventory?.[0]?.current_stock || 0)} style={stockBtnStyle}>
-                        เติมสต็อก
-                      </button>
+                      <div style={{ display: 'flex', gap: '6px' }}>
+                        <button onClick={() => updateStock(p.inventory[0].id, p.inventory[0].current_stock || 0)} style={stockBtnStyle}>
+                          เติมสต็อก
+                        </button>
+                        <button onClick={() => handleEditProduct(p)} style={{ ...stockBtnStyle, backgroundColor: '#6366f1' }}>
+                          แก้ไข
+                        </button>
+                        <button onClick={() => handleDeleteProduct(p.id, p.inventory[0].id)} style={{ ...stockBtnStyle, backgroundColor: '#f44336' }}>
+                          ลบ
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))}
               </tbody>
             </table>
+
+            {/* Edit Product Modal */}
+            {editingProduct && (
+              <div style={{
+                position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+                backgroundColor: 'rgba(0,0,0,0.8)', display: 'flex',
+                justifyContent: 'center', alignItems: 'center', zIndex: 1000
+              }}>
+                <div style={{ backgroundColor: '#1e1e1e', padding: '30px', borderRadius: '16px', minWidth: '350px', boxShadow: '0 10px 40px rgba(0,0,0,0.5)' }}>
+                  <h3 style={{ marginTop: 0, marginBottom: '20px' }}>✏️ แก้ไขสินค้า</h3>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                    <input type="text" placeholder="ชื่อสินค้า" value={editName} onChange={(e) => setEditName(e.target.value)} style={adminInputStyle} />
+                    <input type="number" placeholder="ราคาขาย" value={editPrice} onChange={(e) => setEditPrice(e.target.value)} style={adminInputStyle} />
+                    <input type="number" placeholder="ต้นทุน" value={editCost} onChange={(e) => setEditCost(e.target.value)} style={adminInputStyle} />
+                    <div style={{ display: 'flex', gap: '10px', marginTop: '10px' }}>
+                      <button onClick={handleSaveEdit} style={{ ...adminAddBtnStyle, flex: 1 }}>💾 บันทึก</button>
+                      <button onClick={() => setEditingProduct(null)} style={{ ...adminAddBtnStyle, backgroundColor: '#666', flex: 1 }}>ยกเลิก</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>

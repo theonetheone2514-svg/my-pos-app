@@ -21,34 +21,22 @@ const BarcodeScanner = ({ onScan, mode, setMode }) => {
 
   const startScanning = async () => {
     try {
-      setError('');
-      // Request camera access
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
-      videoStream.current = stream;
-      
-      // Attach stream to video element
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-      }
-
-      // Use html5-qrcode library (assuming it's available globally)
-      // Create scanner instance if not already created
-      if (!scannerRef.current) {
-        scannerRef.current = new window.Html5Qrcode("reader");
+      // Initialize scanner if not already created
+      if (!qrRef.current) {
+        qrRef.current = new Html5Qrcode("reader");
       }
 
       const config = { fps: 10, qrbox: { width: 250, height: 250 } };
 
-      await scannerRef.current.start(
+      await qrRef.current.start(
         { facingMode: "environment" },
         config,
         (decodedText) => {
           setLatestCode(decodedText);
-          onScan(decodedText); // Call parent callback with scanned code
-          // Continue scanning - don't stop automatically
+          handleScanResult(decodedText);
         },
         (error) => {
-          // Temporary error (e.g., no code in frame) - continue scanning
+          // Error handling for scan failures
           console.warn('QR scanning warning:', error);
         }
       );
@@ -56,9 +44,9 @@ const BarcodeScanner = ({ onScan, mode, setMode }) => {
       setIsScanning(true);
     } catch (err) {
       console.error('Failed to start scanner:', err);
-      setError('ไม่สามารถเปิดกล้องได้: ' + err.message);
+      alert('ไม่สามารถเปิดกล้องได้: ' + err.message);
     }
-  };
+  }
 
   const stopScanning = () => {
     if (scannerRef.current) {
