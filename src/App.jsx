@@ -4,6 +4,8 @@ import { Html5Qrcode } from 'html5-qrcode';
 import ReactApexChart from 'react-apexcharts';
 
 import ReceiptModal from './components/ReceiptModal';
+import CustomerModal from './components/CustomerModal';
+import CreditPaymentModal from './components/CreditPaymentModal';
 
 const supabase = createClient(
   import.meta.env.VITE_SUPABASE_URL,
@@ -58,11 +60,24 @@ function App() {
   const [topProducts, setTopProducts] = useState([]);
   const [dateRangeData, setDateRangeData] = useState([]); // For ApexCharts
 
+  // Credit / Customer states
+  const [customers, setCustomers] = useState([]);
+  const [showCustomerModal, setShowCustomerModal] = useState(false);
+  const [editingCustomer, setEditingCustomer] = useState(null);
+  const [showCreditPaymentModal, setShowCreditPaymentModal] = useState(false);
+  const [selectedCreditCustomer, setSelectedCreditCustomer] = useState(null);
+  const [customerSearchTerm, setCustomerSearchTerm] = useState('');
+  const [paymentType, setPaymentType] = useState('cash');
+  const [selectedCustomerId, setSelectedCustomerId] = useState(null);
+  const [creditPayments, setCreditPayments] = useState([]);
+
   // Load initial data
   useEffect(() => {
     fetchProducts();
     fetchSalesHistory();
     fetchSettings();
+    fetchCustomers();
+    fetchCreditPayments();
     // Fetch all sales for profit analysis
     fetchAllSalesForProfit();
   }, []);
@@ -265,6 +280,134 @@ function App() {
       console.error('Error calculating profit:', err);
     }
   }
+
+  // ==================== Customer & Credit Functions ====================
+
+  async function fetchCustomers() {
+    try {
+      const { data, error } = await supabase
+        .from('customers')
+        .select('*')
+        .order('name');
+      if (error) {
+        console.warn('ไม่สามารถโหลดลูกค้าได้ (อาจยังไม่ได้รัน Migration):', error.message);
+        return;
+      }
+      setCustomers(data || []);
+    } catch (err) {
+      console.warn('Error fetching customers:', err);
+    }
+  }
+
+  async function fetchCreditPayments() {
+    try {
+      const { data, error } = await supabase
+        .from('credit_payments')
+        .select('*')
+        .order('paid_at', { ascending: false });
+      if (error) {
+        console.warn('ไม่สามารถโหลดประวัติการชำระหนี้ได้:', error.message);
+        return;
+      }
+      setCreditPayments(data || []);
+    } catch (err) {
+      console.warn('Error fetching credit payments:', err);
+    }
+  }
+
+  const handleAddCustomer = async (customerData) => {
+    const { data, error } = await supabase
+      .from('customers')
+      .insert([customerData])
+      .select();
+    if (error) throw error;
+    await fetchCustomers();
+    return data[0];
+  };
+
+  const handleEditCustomer = async (customerData) => {
+    const { error } = await supabase
+      .from('customers')
+      .update(customerData)
+      .eq('id', editingCustomer.id);
+    if (error) throw error;
+    setEditingCustomer(null);
+    await fetchCustomers();
+  };
+
+  const handleDeleteCustomer = async (customerId) => {
+    if (!confirm('⚠️ ต้องการลบลูกค้านี้?')) return;
+    const { error } = await supabase
+      .from('customers')
+      .delete()
+      .eq('id', customerId);
+    if (error) throw error;
+    await fetchCustomers();
+  };
+
+  const handlePayCredit = async ({ customerId, amount, note }) => {
+    // Find all pending/partial credit sales for this customer
+    const { data: creditSales, error: salesError } = await supabase
+      .from('sales')
+      .select('id, total_amount, credit_status')
+      .eq('customer_id', customerId)
+      .in('credit_status', ['pending', 'partial']);
+
+    if (salesError) throw salesError;
+    if (!creditSales || creditSales.length === 0) throw new Error('ไม่พบยอดหนี้ของลูกค้านี้');
+
+    let remaining = amount;
+    const paymentRecords = [];
+
+    for (const sale of creditSales) {
+      if (remaining <= 0) break;
+      const alreadyPaid = creditPayments
+        .filter(p => p.sale_id === sale.id)
+        .reduce((sum, p) => sum + Number(p.amount), 0);
+      const saleDebt = Number(sale.total_amount) - alreadyPaid;
+      if (saleDebt <= 0) continue;
+
+      const payAmount = Math.min(remaining, saleDebt);
+      paymentRecords.push({ sale_id: sale.id, customer_id: customerId, amount: payAmount, note: note || '' });
+      remaining -= payAmount;
+
+      const newStatus = payAmount >= saleDebt ? 'paid' : 'partial';
+      await supabase.from('sales').update({ credit_status: newStatus }).eq('id', sale.id);
+    }
+
+    if (paymentRecords.length === 0) throw new Error('ไม่พบยอดหนี้ที่ต้องชำระ');
+
+    const { error: payError } = await supabase
+      .from('credit_payments')
+      .insert(paymentRecords);
+    if (payError) throw payError;
+
+    await fetchCreditPayments();
+    await fetchSalesHistory();
+    alert('บันทึกการชำระเงินเรียบร้อย');
+  };
+
+  // Calculate debt for each customer from sales data
+  const getCustomerDebt = (customerId) => {
+    const customerSales = profitData.filter(
+      s => s.customer_id === customerId && (s.credit_status === 'pending' || s.credit_status === 'partial')
+    );
+    const totalDebt = customerSales.reduce((sum, s) => sum + Number(s.total_amount || 0), 0);
+    const totalPaid = creditPayments
+      .filter(p => p.customer_id === customerId)
+      .reduce((sum, p) => sum + Number(p.amount), 0);
+    return Math.max(0, totalDebt - totalPaid);
+  };
+
+  const getCustomerOldestDebtDate = (customerId) => {
+    const dates = profitData
+      .filter(s => s.customer_id === customerId)
+      .map(s => s.created_at)
+      .filter(Boolean);
+    if (dates.length === 0) return '-';
+    dates.sort();
+    return new Date(dates[0]).toLocaleDateString('th-TH');
+  };
 
   // Fetch settings
   const fetchSettings = async () => {
@@ -562,6 +705,10 @@ function App() {
   const handleCheckout = async () => {
     if (cart.length === 0) return;
 
+    if (paymentType === 'credit' && !selectedCustomerId) {
+      return alert('กรุณาเลือกลูกค้าสำหรับการขายเชื่อ');
+    }
+
     setLoading(true);
     try {
       const totalAmount = cart.reduce((sum, item) => sum + item.price * item.qty, 0);
@@ -575,6 +722,23 @@ function App() {
 
       const saleId = data?.id;
       if (saleId) {
+        // Update sale with customer and credit info if credit sale
+        if (paymentType === 'credit') {
+          await supabase
+            .from('sales')
+            .update({
+              customer_id: selectedCustomerId,
+              payment_type: 'credit',
+              credit_status: 'pending',
+            })
+            .eq('id', saleId);
+        } else {
+          await supabase
+            .from('sales')
+            .update({ payment_type: 'cash' })
+            .eq('id', saleId);
+        }
+
         for (const item of cart) {
           await recordMovement(item.id, -item.qty, 'sale', saleId);
         }
@@ -591,8 +755,11 @@ function App() {
       }
 
       setCart([]);
+      setPaymentType('cash');
+      setSelectedCustomerId(null);
       await fetchProducts();
       await fetchSalesHistory();
+      await fetchAllSalesForProfit();
     } catch (err) {
       alert('เกิดข้อผิดพลาดในการชำระเงิน: ' + err.message);
     } finally {
@@ -759,6 +926,8 @@ function App() {
           <button onClick={() => setView('pos')} style={navBtnStyle(view === 'pos')}>🛒 ขายสินค้า</button>
           <button onClick={() => setView('dashboard')} style={navBtnStyle(view === 'dashboard')}>📊 ยอดขาย</button>
           <button onClick={() => setView('profit')} style={navBtnStyle(view === 'profit')}>💰 กำไร</button>
+          <button onClick={() => { setView('customers'); fetchCustomers(); }} style={navBtnStyle(view === 'customers')}>👥 ลูกค้า</button>
+          <button onClick={() => { setView('credit'); }} style={navBtnStyle(view === 'credit')}>💰 ติดหนี้</button>
           <button onClick={() => setView('admin')} style={navBtnStyle(view === 'admin')}>
             ⚙️ จัดการสินค้า
             {products.filter(p => (p.inventory?.[0]?.current_stock || 0) <= (p.inventory?.[0]?.min_stock_level || 0)).length > 0 && (
@@ -853,8 +1022,55 @@ function App() {
               <div style={{ marginTop: '20px', fontSize: '1.5rem', fontWeight: 'bold', textAlign: 'right' }}>
                 รวมทั้งสิ้น: ฿{cart.reduce((sum, item) => sum + item.price * item.qty, 0).toLocaleString()}
               </div>
+
+              {/* Payment Type Selector */}
+              <div style={{ display: 'flex', gap: '10px', marginTop: '15px' }}>
+                <button
+                  onClick={() => { setPaymentType('cash'); setSelectedCustomerId(null); }}
+                  style={{
+                    flex: 1, padding: '12px', borderRadius: '8px', border: 'none',
+                    backgroundColor: paymentType === 'cash' ? '#10b981' : '#333',
+                    color: 'white', fontWeight: 'bold', cursor: 'pointer'
+                  }}
+                >💵 เงินสด</button>
+                <button
+                  onClick={() => setPaymentType('credit')}
+                  style={{
+                    flex: 1, padding: '12px', borderRadius: '8px', border: 'none',
+                    backgroundColor: paymentType === 'credit' ? '#f59e0b' : '#333',
+                    color: 'white', fontWeight: 'bold', cursor: 'pointer'
+                  }}
+                >📝 เงินเชื่อ</button>
+              </div>
+
+              {/* Customer Selection for Credit Sales */}
+              {paymentType === 'credit' && (
+                <div style={{ marginTop: '12px' }}>
+                  <select
+                    value={selectedCustomerId || ''}
+                    onChange={(e) => setSelectedCustomerId(Number(e.target.value) || null)}
+                    style={{
+                      width: '100%', padding: '12px', borderRadius: '8px', border: '1px solid #444',
+                      backgroundColor: '#121212', color: 'white', marginBottom: '8px'
+                    }}
+                  >
+                    <option value="">-- เลือกลูกค้า --</option>
+                    {customers.map(c => (
+                      <option key={c.id} value={c.id}>{c.name}{c.phone ? ` (${c.phone})` : ''}</option>
+                    ))}
+                  </select>
+                  <button
+                    onClick={() => setShowCustomerModal(true)}
+                    style={{
+                      width: '100%', padding: '10px', borderRadius: '8px', border: 'none',
+                      backgroundColor: '#6366f1', color: 'white', cursor: 'pointer', fontWeight: 'bold'
+                    }}
+                  >👤 + เพิ่มลูกค้าใหม่</button>
+                </div>
+              )}
+
               <button onClick={handleCheckout} disabled={loading || cart.length === 0} style={checkoutBtnStyle}>
-                {loading ? 'กำลังบันทึก...' : 'ชำระเงิน • ยืนยันออเดอร์'}
+                {loading ? 'กำลังบันทึก...' : paymentType === 'credit' ? 'ขายเชื่อ • ยืนยันออเดอร์' : 'ชำระเงิน • ยืนยันออเดอร์'}
               </button>
             </div>
           </div>
@@ -1003,6 +1219,170 @@ function App() {
           </div>
         )}
 
+        {/* ==================== CUSTOMERS ==================== */}
+        {view === 'customers' && (
+          <div style={{ maxWidth: '900px', margin: '0 auto' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
+              <h2>👥 จัดการลูกค้า</h2>
+              <button onClick={() => setShowCustomerModal(true)} style={adminAddBtnStyle}>+ เพิ่มลูกค้า</button>
+            </div>
+
+            <input
+              type="text"
+              placeholder="🔍 ค้นหาลูกค้า..."
+              value={customerSearchTerm}
+              onChange={(e) => setCustomerSearchTerm(e.target.value)}
+              style={{ padding: '10px 15px', borderRadius: '8px', border: '1px solid #444', backgroundColor: '#1e1e1e', color: 'white', width: '100%', marginBottom: '15px', fontSize: '1rem' }}
+            />
+
+            <table style={tableStyle}>
+              <thead>
+                <tr>
+                  <th style={{ padding: '15px' }}>ชื่อ</th>
+                  <th style={{ padding: '15px' }}>เบอร์โทร</th>
+                  <th style={{ padding: '15px' }}>ที่อยู่</th>
+                  <th style={{ padding: '15px' }}>วันที่เพิ่ม</th>
+                  <th style={{ padding: '15px' }}>จัดการ</th>
+                </tr>
+              </thead>
+              <tbody>
+                {customers
+                  .filter(c => !customerSearchTerm || c.name.includes(customerSearchTerm) || c.phone?.includes(customerSearchTerm))
+                  .map(c => (
+                  <tr key={c.id}>
+                    <td style={{ padding: '15px' }}>{c.name}</td>
+                    <td style={{ padding: '15px', color: '#aaa' }}>{c.phone || '-'}</td>
+                    <td style={{ padding: '15px', color: '#aaa' }}>{c.address || '-'}</td>
+                    <td style={{ padding: '15px' }}>{c.created_at ? new Date(c.created_at).toLocaleDateString('th-TH') : '-'}</td>
+                    <td style={{ padding: '15px' }}>
+                      <div style={{ display: 'flex', gap: '6px' }}>
+                        <button onClick={() => { setEditingCustomer(c); setShowCustomerModal(true); }} style={{ ...stockBtnStyle, backgroundColor: '#6366f1' }}>
+                          แก้ไข
+                        </button>
+                        <button onClick={() => handleDeleteCustomer(c.id)} style={{ ...stockBtnStyle, backgroundColor: '#f44336' }}>
+                          ลบ
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+                {customers.length === 0 && (
+                  <tr><td colSpan="5" style={{ textAlign: 'center', padding: '50px', color: '#666' }}>ยังไม่มีข้อมูลลูกค้า</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {/* ==================== CREDIT (DEBT) VIEW ==================== */}
+        {view === 'credit' && (
+          <div style={{ maxWidth: '1000px', margin: '0 auto' }}>
+            <h2 style={{ marginBottom: '20px' }}>💰 ติดหนี้ — ยอดหนี้คงค้าง</h2>
+
+            {/* Debt Summary Cards */}
+            <div style={{ display: 'flex', gap: '20px', marginBottom: '30px', flexWrap: 'wrap' }}>
+              <div style={{ ...statCardStyle, flex: '1', minWidth: '200px' }}>
+                <p style={{ color: '#aaa' }}>ลูกค้าที่มียอดหนี้</p>
+                <h1 style={{ color: '#f59e0b' }}>{customers.filter(c => getCustomerDebt(c.id) > 0).length} ราย</h1>
+              </div>
+              <div style={{ ...statCardStyle, flex: '1', minWidth: '200px' }}>
+                <p style={{ color: '#aaa' }}>ยอดหนี้รวมทั้งหมด</p>
+                <h1 style={{ color: '#f44336' }}>
+                  ฿{customers.reduce((sum, c) => sum + getCustomerDebt(c.id), 0).toLocaleString()}
+                </h1>
+              </div>
+              <div style={{ ...statCardStyle, flex: '1', minWidth: '200px' }}>
+                <p style={{ color: '#aaa' }}>ชำระแล้ว</p>
+                <h1 style={{ color: '#10b981' }}>
+                  ฿{creditPayments.reduce((sum, p) => sum + Number(p.amount), 0).toLocaleString()}
+                </h1>
+              </div>
+            </div>
+
+            {/* Customer Debt Table */}
+            <div style={{ backgroundColor: '#1e1e1e', borderRadius: '12px', border: '1px solid #333', overflow: 'hidden', marginBottom: '30px' }}>
+              <h3 style={{ padding: '15px', margin: 0, borderBottom: '1px solid #333' }}>📋 รายละเอียดหนี้ตามลูกค้า</h3>
+              <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                <thead>
+                  <tr style={{ borderBottom: '1px solid #333' }}>
+                    <th style={{ padding: '12px', textAlign: 'left', color: '#aaa' }}>ลูกค้า</th>
+                    <th style={{ padding: '12px', textAlign: 'right', color: '#aaa' }}>ยอดหนี้คงค้าง</th>
+                    <th style={{ padding: '12px', textAlign: 'center', color: '#aaa' }}>วันที่ค้างนานที่สุด</th>
+                    <th style={{ padding: '12px', textAlign: 'center', color: '#aaa' }}>จัดการ</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {customers.filter(c => getCustomerDebt(c.id) > 0).length > 0 ? customers
+                    .filter(c => getCustomerDebt(c.id) > 0)
+                    .sort((a, b) => getCustomerDebt(b.id) - getCustomerDebt(a.id))
+                    .map(c => {
+                      const debt = getCustomerDebt(c.id);
+                      return (
+                        <tr key={c.id} style={{ borderBottom: '1px solid #333' }}>
+                          <td style={{ padding: '12px' }}>
+                            <div>{c.name}</div>
+                            <div style={{ fontSize: '0.8rem', color: '#888' }}>{c.phone || ''}</div>
+                          </td>
+                          <td style={{ padding: '12px', textAlign: 'right', color: '#f44336', fontWeight: 'bold', fontSize: '1.1rem' }}>
+                            ฿{debt.toLocaleString()}
+                          </td>
+                          <td style={{ padding: '12px', textAlign: 'center', color: '#aaa' }}>
+                            {getCustomerOldestDebtDate(c.id)}
+                          </td>
+                          <td style={{ padding: '12px', textAlign: 'center' }}>
+                            <button
+                              onClick={() => { setSelectedCreditCustomer(c); setShowCreditPaymentModal(true); }}
+                              style={{ backgroundColor: '#10b981', color: 'white', border: 'none', padding: '8px 16px', borderRadius: '6px', cursor: 'pointer' }}
+                            >💰 รับชำระ</button>
+                          </td>
+                        </tr>
+                      );
+                    }) : (
+                    <tr>
+                      <td colSpan="4" style={{ padding: '40px', textAlign: 'center', color: '#666' }}>
+                        ✅ ไม่มียอดหนี้คงค้าง
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Payment History */}
+            <div style={{ backgroundColor: '#1e1e1e', borderRadius: '12px', border: '1px solid #333', overflow: 'hidden' }}>
+              <h3 style={{ padding: '15px', margin: 0, borderBottom: '1px solid #333' }}>📜 ประวัติการชำระหนี้</h3>
+              <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                <thead>
+                  <tr style={{ borderBottom: '1px solid #333' }}>
+                    <th style={{ padding: '12px', textAlign: 'left', color: '#aaa' }}>วันที่</th>
+                    <th style={{ padding: '12px', textAlign: 'left', color: '#aaa' }}>ลูกค้า</th>
+                    <th style={{ padding: '12px', textAlign: 'right', color: '#aaa' }}>จำนวนเงิน</th>
+                    <th style={{ padding: '12px', textAlign: 'left', color: '#aaa' }}>หมายเหตุ</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {creditPayments.map(p => {
+                    const customer = customers.find(c => c.id === p.customer_id);
+                    return (
+                      <tr key={p.id} style={{ borderBottom: '1px solid #333' }}>
+                        <td style={{ padding: '12px' }}>{new Date(p.paid_at).toLocaleString('th-TH')}</td>
+                        <td style={{ padding: '12px' }}>{customer?.name || 'ไม่พบข้อมูล'}</td>
+                        <td style={{ padding: '12px', textAlign: 'right', color: '#10b981', fontWeight: 'bold' }}>
+                          ฿{Number(p.amount).toLocaleString()}
+                        </td>
+                        <td style={{ padding: '12px', color: '#aaa' }}>{p.note || '-'}</td>
+                      </tr>
+                    );
+                  })}
+                  {creditPayments.length === 0 && (
+                    <tr><td colSpan="4" style={{ textAlign: 'center', padding: '40px', color: '#666' }}>ยังไม่มีประวัติการชำระหนี้</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
         {/* ==================== ADMIN ==================== */}
         {view === 'admin' && (
           <div style={{ maxWidth: '900px', margin: '0 auto' }}>
@@ -1101,6 +1481,24 @@ function App() {
           settings={settings}
         />
       )}
+
+      <CustomerModal
+        isOpen={showCustomerModal}
+        onClose={() => { setShowCustomerModal(false); setEditingCustomer(null); }}
+        onSave={editingCustomer
+          ? (data) => handleEditCustomer(data)
+          : (data) => handleAddCustomer(data)
+        }
+        initial={editingCustomer}
+      />
+
+      <CreditPaymentModal
+        isOpen={showCreditPaymentModal}
+        onClose={() => { setShowCreditPaymentModal(false); setSelectedCreditCustomer(null); }}
+        onPay={handlePayCredit}
+        customer={selectedCreditCustomer || {}}
+        totalDebt={selectedCreditCustomer ? getCustomerDebt(selectedCreditCustomer.id) : 0}
+      />
     </div>
   );
 }

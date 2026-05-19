@@ -7,9 +7,11 @@ ALTER TABLE sales DISABLE ROW LEVEL SECURITY;
 ALTER TABLE sale_items DISABLE ROW LEVEL SECURITY;
 ALTER TABLE stock_movements DISABLE ROW LEVEL SECURITY;
 ALTER TABLE settings DISABLE ROW LEVEL SECURITY;
+ALTER TABLE customers DISABLE ROW LEVEL SECURITY;
+ALTER TABLE credit_payments DISABLE ROW LEVEL SECURITY;
 
 -- คำสั่งตรวจสอบสถานะ RLS หลังปิดแล้ว
 SELECT tablename, rowsecurity 
 FROM pg_tables 
 WHERE schemaname = 'public' 
-AND tablename IN ('products', 'inventory', 'sales', 'sale_items', 'stock_movements', 'settings');
+AND tablename IN ('products', 'inventory', 'sales', 'sale_items', 'stock_movements', 'settings', 'customers', 'credit_payments');
